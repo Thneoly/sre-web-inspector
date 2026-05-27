@@ -61,6 +61,41 @@ class RequestReplayer:
         response = await self.context.request.post(url, data=data, headers=headers, timeout=timeout)
         return await self._build_result(name=name, method="POST", url=url, response=response)
 
+    async def put_json(
+        self,
+        url: str,
+        *,
+        name: str = "put_json_result",
+        data: dict[str, Any] | list[Any] | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: int | None = None,
+    ) -> ReplayResult:
+        response = await self.context.request.put(url, data=data, headers=headers, timeout=timeout)
+        return await self._build_result(name=name, method="PUT", url=url, response=response)
+
+    async def patch_json(
+        self,
+        url: str,
+        *,
+        name: str = "patch_json_result",
+        data: dict[str, Any] | list[Any] | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: int | None = None,
+    ) -> ReplayResult:
+        response = await self.context.request.patch(url, data=data, headers=headers, timeout=timeout)
+        return await self._build_result(name=name, method="PATCH", url=url, response=response)
+
+    async def delete(
+        self,
+        url: str,
+        *,
+        name: str = "delete_result",
+        headers: dict[str, str] | None = None,
+        timeout: int | None = None,
+    ) -> ReplayResult:
+        response = await self.context.request.delete(url, headers=headers, timeout=timeout)
+        return await self._build_result(name=name, method="DELETE", url=url, response=response)
+
     async def post_form(
         self,
         url: str,

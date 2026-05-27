@@ -1,0 +1,39 @@
+# Litchi Shop (lizhi.shop) product catalog scraper
+# Uses sre_web_inspector pipeline: BrowserContextManager → WebInspectionNode
+# → route middleware → hooks → reporter
+
+vars:
+  base_url: https://lizhi.shop
+  start_page: 1
+  max_pages: 0   # 0 = all pages (~19 for 378 products)
+
+runtime:
+  output_dir: outputs
+  concurrency: 1         # sequential to avoid rate limiting
+  timeout: 30000
+  retry:
+    times: 2
+    interval_ms: 1000
+
+browser:
+  headless: true
+  slow_mo: 200
+  ignore_https_errors: true
+  no_viewport: true
+  start_maximized: true
+
+# Context-level middlewares: block images/fonts to speed up scraping
+context_middlewares:
+  routes:
+    - name: block_static
+      pattern: "**/*"
+      middlewares:
+        - type: block_resource
+          resource_types:
+            - image
+            - font
+            - media
+            - stylesheet
+
+# No global pages — the scraper script handles page navigation dynamically.
+pages: []

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Mapping
+
+logger = logging.getLogger(__name__)
 
 _VAR_RE = re.compile(r"{{\s*([a-zA-Z0-9_.-]+)\s*}}")
 
@@ -25,11 +28,18 @@ def render_value(value: Any, vars_map: Mapping[str, Any]) -> Any:
     if isinstance(value, str):
         full = _VAR_RE.fullmatch(value)
         if full:
-            found = get_by_path(vars_map, full.group(1), value)
+            var_name = full.group(1)
+            found = get_by_path(vars_map, var_name, value)
+            if found is value:
+                logger.warning("Template variable not found: {{ %s }}, keeping placeholder", var_name)
             return found
 
         def repl(match: re.Match[str]) -> str:
-            found = get_by_path(vars_map, match.group(1), match.group(0))
+            var_name = match.group(1)
+            placeholder = match.group(0)
+            found = get_by_path(vars_map, var_name, placeholder)
+            if found is placeholder:
+                logger.warning("Template variable not found: {{ %s }}, keeping placeholder", var_name)
             return str(found)
 
         return _VAR_RE.sub(repl, value)

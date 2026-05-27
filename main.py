@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,9 @@ import yaml
 from pydantic import ValidationError
 
 from sre_web_inspector import BrowserContextManager, RequestReplayer
-from sre_web_inspector.config_schema import AppConfig, PageConfig, ReplayRequestConfig
+from sre_web_inspector.config_schema import AppConfig, HooksConfig, PageConfig, ReplayRequestConfig
+from sre_web_inspector.hooks import run_hooks
+from sre_web_inspector.reporter import write_html_report, write_json_report
 from sre_web_inspector.inspector import WebInspectionNode
 from sre_web_inspector.network.factory import (
     build_context_middleware_manager,
@@ -24,15 +27,31 @@ from sre_web_inspector.template import build_vars, render_value
 logger = logging.getLogger(__name__)
 
 
+def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Deep merge override into base. Lists are concatenated, dicts are merged recursively."""
+    result = deepcopy(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
+        elif key in result and isinstance(result[key], list) and isinstance(value, list):
+            result[key] = result[key] + value
+        else:
+            result[key] = deepcopy(value)
+    return result
+
+
 def load_config(path: str | Path) -> dict[str, Any]:
     with Path(path).open("r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
     return raw
 
 
-def load_and_validate_config(path: str | Path) -> tuple[AppConfig, dict[str, Any]]:
-    raw = load_config(path)
-    rendered = render_value(raw, build_vars(raw))
+def load_and_validate_config(*paths: str | Path) -> tuple[AppConfig, dict[str, Any]]:
+    merged: dict[str, Any] = {}
+    for path in paths:
+        raw = load_config(path)
+        merged = deep_merge(merged, raw)
+    rendered = render_value(merged, build_vars(merged))
     try:
         return AppConfig.model_validate(rendered), rendered
     except ValidationError as exc:
@@ -115,6 +134,29 @@ async def run_replay_requests(
                     item.url,
                     name=item.name,
                     form=item.form,
+                    headers=item.headers,
+                    timeout=timeout,
+                )
+            if method == "PUT":
+                return await replayer.put_json(
+                    item.url,
+                    name=item.name,
+                    data=item.data,
+                    headers=item.headers,
+                    timeout=timeout,
+                )
+            if method == "PATCH":
+                return await replayer.patch_json(
+                    item.url,
+                    name=item.name,
+                    data=item.data,
+                    headers=item.headers,
+                    timeout=timeout,
+                )
+            if method == "DELETE":
+                return await replayer.delete(
+                    item.url,
+                    name=item.name,
                     headers=item.headers,
                     timeout=timeout,
                 )
@@ -275,11 +317,27 @@ async def inspect_one_page(
                     timeout=timeout,
                 )
 
+            page_hooks = page_cfg.hooks
+            if page_hooks and page_hooks.on_page_before_goto:
+                await run_hooks(page_hooks.on_page_before_goto, env={
+                    "SRE_RUN_ID": run_ctx.run_id,
+                    "SRE_PAGE_NAME": page_name,
+                    "SRE_PAGE_URL": page_cfg.url,
+                })
+
             inspection = await run_with_retry(
                 do_inspect,
                 policy=retry_policy,
                 name=f"inspect_page:{page_name}",
             )
+
+            if page_hooks and page_hooks.on_page_after_load:
+                await run_hooks(page_hooks.on_page_after_load, env={
+                    "SRE_RUN_ID": run_ctx.run_id,
+                    "SRE_PAGE_NAME": page_name,
+                    "SRE_PAGE_URL": page_cfg.url,
+                    "SRE_PAGE_TITLE": inspection.get("title", ""),
+                })
             waits = await consume_wait_tasks(wait_tasks)
 
             replays = await run_replay_requests(
@@ -316,15 +374,25 @@ async def inspect_one_page(
 
 async def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="config/example.yaml")
+    parser.add_argument("--config", action="append", default=None, help="Config file(s), merged in order")
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--page", default=None, help="Run only the named page(s), comma-separated")
+    parser.add_argument("--list-pages", action="store_true", help="List page names from config and exit")
+    parser.add_argument("--output-format", default="json,html", help="Output formats: json,html (comma-separated)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
-    app_cfg, rendered_config = load_and_validate_config(args.config)
+    config_paths = args.config or ["config/example.yaml"]
+
+    app_cfg, rendered_config = load_and_validate_config(*config_paths)
     if args.validate_only:
         print("Config validation passed")
+        return
+
+    if args.list_pages:
+        for page in app_cfg.pages:
+            print(page.name or page.url)
         return
 
     run_ctx = RunContext.create(app_cfg.runtime.output_dir, app_cfg.runtime.run_id)
@@ -340,6 +408,12 @@ async def main() -> None:
         context_network_manager = build_context_middleware_manager(rendered_config)
         await context_network_manager.bind_to_context(cm.context)
 
+        if app_cfg.hooks and app_cfg.hooks.on_browser_start:
+            await run_hooks(app_cfg.hooks.on_browser_start, env={
+                "SRE_RUN_ID": run_ctx.run_id,
+                "SRE_OUTPUT_DIR": str(run_ctx.output_dir),
+            })
+
         default_retry = RetryPolicy.from_config(app_cfg.runtime.retry.model_dump())
         global_replays = await run_replay_requests(
             cm,
@@ -354,6 +428,17 @@ async def main() -> None:
         semaphore = asyncio.Semaphore(app_cfg.runtime.concurrency)
 
         raw_pages = rendered_config.get("pages", []) or []
+
+        # Filter pages when --page is specified
+        page_filter: set[str] | None = None
+        if args.page:
+            page_filter = {p.strip() for p in args.page.split(",")}
+
+        def _page_matches(name: str | None, url: str) -> bool:
+            if page_filter is None:
+                return True
+            return (name or "") in page_filter or url in page_filter
+
         page_tasks = [
             asyncio.create_task(
                 inspect_one_page(
@@ -368,8 +453,16 @@ async def main() -> None:
                 )
             )
             for raw_page_cfg, page_cfg in zip(raw_pages, app_cfg.pages, strict=False)
+            if _page_matches(page_cfg.name, page_cfg.url)
         ]
         page_results = await asyncio.gather(*page_tasks)
+
+        if app_cfg.hooks and app_cfg.hooks.on_run_complete:
+            await run_hooks(app_cfg.hooks.on_run_complete, env={
+                "SRE_RUN_ID": run_ctx.run_id,
+                "SRE_OUTPUT_DIR": str(run_ctx.output_dir),
+                "SRE_ALL_OK": str(all(page.get("ok") for page in page_results)),
+            })
 
         summary = {
             "kind": "WebInspectionRun",
@@ -380,10 +473,17 @@ async def main() -> None:
             "pages": page_results,
         }
 
-        output_path = run_ctx.output_dir / "run_result.json"
-        output_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        output_formats = {f.strip() for f in args.output_format.split(",")}
+
+        if "json" in output_formats:
+            json_path = write_json_report(summary, run_ctx.output_dir)
+            logger.info("JSON report saved to %s", json_path)
+
+        if "html" in output_formats:
+            html_path = write_html_report(summary, run_ctx.output_dir)
+            logger.info("HTML report saved to %s", html_path)
+
         print(json.dumps(summary, ensure_ascii=False, indent=2))
-        logger.info("run result saved to %s", output_path)
 
 
 if __name__ == "__main__":

@@ -36,7 +36,7 @@ class BrowserConfig(BaseModel):
 class ReplayRequestConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     name: str
-    method: Literal["GET", "POST"] = "GET"
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = "GET"
     url: str
     params: dict[str, Any] | None = None
     headers: dict[str, str] | None = None
@@ -75,6 +75,20 @@ class WaitResponseConfig(BaseModel):
     timeout: int = Field(default=30_000, ge=1)
 
 
+class HookConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    commands: list[str] = Field(default_factory=list)
+    timeout: int = Field(default=30, ge=1)
+
+
+class HooksConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    on_browser_start: HookConfig | None = None
+    on_page_before_goto: HookConfig | None = None
+    on_page_after_load: HookConfig | None = None
+    on_run_complete: HookConfig | None = None
+
+
 class PageLifecycleConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     close_after_inspection: bool = True
@@ -93,6 +107,7 @@ class PageConfig(BaseModel):
     retry: RetryConfig | None = None
     lifecycle: PageLifecycleConfig = Field(default_factory=PageLifecycleConfig)
     close_page: bool | None = None  # backward compatible
+    hooks: HooksConfig | None = None
     network_middlewares: dict[str, Any] | None = None
     pre_replay_requests: list[ReplayRequestConfig] = Field(default_factory=list)
     replay_requests: list[ReplayRequestConfig] = Field(default_factory=list)
@@ -111,6 +126,7 @@ class AppConfig(BaseModel):
     vars: dict[str, Any] = Field(default_factory=dict)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
+    hooks: HooksConfig | None = None
     context_middlewares: dict[str, Any] | None = None
     network_middlewares: dict[str, Any] | None = None
     replay_requests: list[ReplayRequestConfig] = Field(default_factory=list)

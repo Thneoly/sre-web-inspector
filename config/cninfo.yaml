@@ -1,0 +1,43 @@
+# Cninfo (巨潮资讯网) announcement scraper
+# Uses sre_web_inspector pipeline: BrowserContextManager → WebInspectionNode
+# → response middleware → retry → reporter
+#
+# Exchange coverage:
+#   szse      - 深市主板 (Shenzhen Main Board)
+#   szse_gem  - 创业板 (ChiNext / GEM)
+#   sse       - 沪市主板 (Shanghai Main Board)
+#   sse_star  - 科创板 (STAR Market)
+#   bj        - 北交所 (Beijing Stock Exchange)
+
+vars:
+  base_url: https://www.cninfo.com.cn
+  max_clicks: 10
+
+runtime:
+  output_dir: outputs
+  concurrency: 1
+  timeout: 30000
+  retry:
+    times: 3
+    interval_ms: 2000
+
+browser:
+  headless: true
+  slow_mo: 300
+  ignore_https_errors: true
+  no_viewport: true
+  start_maximized: true
+
+# Block images, fonts, media to speed up page rendering
+context_middlewares:
+  routes:
+    - name: block_static
+      pattern: "**/*"
+      middlewares:
+        - type: block_resource
+          resource_types:
+            - image
+            - font
+            - media
+
+pages: []

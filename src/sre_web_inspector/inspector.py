@@ -1,18 +1,43 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 from playwright.async_api import Page, Request, Response
 
 from .browser_context import BrowserContextManager
+from .network.manager import ResponseMiddlewareManager
+from .network.middleware import ResponseMiddleware
 from .request_utils import safe_filename
+
+logger = logging.getLogger(__name__)
 
 
 class WebInspectionNode:
+    """Navigate pages, collect evidence, and manage per-page middleware."""
+
     def __init__(self, context_manager: BrowserContextManager) -> None:
         self.cm = context_manager
+        self._response_middlewares: list[ResponseMiddleware] = []
+
+    # -- middleware -------------------------------------------------------
+
+    def add_response_middleware(self, mw: ResponseMiddleware) -> None:
+        """Register a response middleware that will be bound to every page
+        navigated via ``inspect_page``."""
+        self._response_middlewares.append(mw)
+
+    def _bind_response_middlewares(self, page: Page) -> None:
+        if not self._response_middlewares:
+            return
+        mgr = ResponseMiddlewareManager()
+        for mw in self._response_middlewares:
+            mgr.add(mw)
+        mgr.bind_to_page(page)
+
+    # -- inspect ----------------------------------------------------------
 
     async def inspect_page(
         self,
@@ -26,8 +51,21 @@ class WebInspectionNode:
         save_network: bool = True,
         wait_ms: int = 1000,
         timeout: int = 60_000,
+        wait_for_network_idle: bool = False,
+        wait_for_selector: str | None = None,
+        network_idle_timeout: int = 15000,
     ) -> dict[str, Any]:
-        """巡检单个页面。支持 page 专属网络记录，适合并发执行。"""
+        """Inspect a single page with optional SPA-aware waiting.
+
+        Parameters
+        ----------
+        wait_for_network_idle:
+            After goto, wait until the network has been idle for 500 ms
+            (SPA-friendly).  Uses *network_idle_timeout* as the upper bound.
+        wait_for_selector:
+            CSS selector to wait for after navigation (e.g.
+            ``a[href*=\"announcementId\"]``).  Times out after 10 s.
+        """
         target_page = page or self.cm.page
         if target_page is None:
             raise RuntimeError("Page is not initialized")
@@ -60,8 +98,30 @@ class WebInspectionNode:
             target_page.on("request", on_request)
             target_page.on("response", on_response)
 
+        # Bind registered response middlewares for this page.
+        self._bind_response_middlewares(target_page)
+
         try:
             await self.cm.goto(url, page=target_page, timeout=timeout)
+
+            # SPA: wait for XHR/fetch to settle
+            if wait_for_network_idle:
+                try:
+                    await target_page.wait_for_load_state(
+                        "networkidle", timeout=network_idle_timeout
+                    )
+                except Exception:
+                    logger.debug("networkidle wait timed out")
+
+            # SPA: wait for a specific DOM element
+            if wait_for_selector:
+                try:
+                    await target_page.wait_for_selector(
+                        wait_for_selector, timeout=10000
+                    )
+                except Exception:
+                    logger.debug("selector wait timed out: %s", wait_for_selector)
+
             if wait_ms > 0:
                 await self.cm.wait_for_timeout(wait_ms, page=target_page)
 
@@ -108,7 +168,6 @@ class WebInspectionNode:
             result["response_count"] = len(local_responses) if save_network else len(self.cm.responses)
             return result
         finally:
-            # Playwright Python supports remove_listener on event emitters.
             if save_network:
                 try:
                     target_page.remove_listener("request", on_request)
