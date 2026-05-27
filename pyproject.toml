@@ -1,0 +1,17 @@
+[project]
+name = "sre-web-inspector"
+version = "0.4.0"
+description = "SRE web inspection toolkit with page-scoped middleware, replay, templates, retry, concurrency, and run_id outputs."
+requires-python = ">=3.10"
+dependencies = [
+    "playwright>=1.45.0",
+    "PyYAML>=6.0.1",
+    "pydantic>=2.6.0",
+]
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["sre_web_inspector*"]

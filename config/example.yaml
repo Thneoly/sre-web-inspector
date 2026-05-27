@@ -1,0 +1,152 @@
+vars:
+  base_url: https://example.com
+  namespace: default
+  page_size: 200
+  grafana_url: https://grafana.example.com
+
+runtime:
+  # 每次运行输出到 outputs/runs/{run_id}/ 下。
+  # run_id 留空时自动生成，例如 20260527-153000。
+  output_dir: outputs
+  run_id:
+  concurrency: 2
+  timeout: 60000
+  retry:
+    times: 2
+    interval_ms: 1000
+
+browser:
+  headless: false
+  slow_mo: 300
+  user_data_dir: ./user-data
+  ignore_https_errors: true
+
+# Context 级别：绑定到整个 BrowserContext，对所有 page 生效。
+context_middlewares:
+  routes:
+    - name: block_static_resources
+      pattern: "**/*"
+      middlewares:
+        - type: block_resource
+          resource_types:
+            - image
+            - font
+            - media
+
+# 全局 Page 级别：每个 pages[] 默认继承。
+network_middlewares:
+  requests:
+    - type: request_recorder
+      output_dir: outputs/network/global
+      filename: request_records.jsonl
+      url_keywords:
+        - /api/
+  responses:
+    - type: json_response_saver
+      output_dir: outputs/responses/global
+      url_keywords:
+        - /api/
+
+# 全局 replay：启动浏览器上下文后执行一次。
+replay_requests:
+  - name: current_user
+    method: GET
+    url: "{{ base_url }}/api/current-user"
+    timeout: 30000
+    retry:
+      times: 2
+      interval_ms: 1000
+
+pages:
+  - name: pod_page
+    url: "{{ base_url }}/pods"
+    screenshot: true
+    save_html: true
+    save_network: true
+    wait_ms: 1500
+    timeout: 60000
+    retry:
+      times: 2
+      interval_ms: 1000
+    lifecycle:
+      close_after_inspection: true
+      clear_network_records: true
+
+    network_middlewares:
+      routes:
+        - name: pod_api_patch
+          pattern: "**/*/api/pods*"
+          middlewares:
+            - type: query_param_patch
+              set:
+                namespace: "{{ namespace }}"
+                pageSize: "{{ page_size }}"
+              remove:
+                - page
+            - type: route_recorder
+              output_dir: outputs/network/pod_page
+      responses:
+        - type: json_response_saver
+          output_dir: outputs/responses/pod_page
+          url_keywords:
+            - /api/pods
+
+    wait_for_requests:
+      - name: pod_request
+        keyword: /api/pods
+        timeout: 30000
+
+    wait_for_responses:
+      - name: pod_response
+        keyword: /api/pods
+        status: 200
+        timeout: 30000
+
+    # Page 打开前执行，适合预热接口、确认权限、获取选项。
+    pre_replay_requests:
+      - name: pod_options
+        method: GET
+        url: "{{ base_url }}/api/pod-options"
+        params:
+          namespace: "{{ namespace }}"
+
+    # Page 打开后执行，结果归属到当前 page。
+    replay_requests:
+      - name: pod_full_list
+        method: GET
+        url: "{{ base_url }}/api/pods"
+        params:
+          namespace: "{{ namespace }}"
+          pageSize: "{{ page_size }}"
+
+  - name: grafana_page
+    url: "{{ grafana_url }}/d/system-overview/system-overview"
+    screenshot: true
+    save_html: false
+    save_network: true
+    wait_ms: 2000
+    lifecycle:
+      close_after_inspection: true
+      clear_network_records: true
+
+    network_middlewares:
+      routes:
+        - name: grafana_query_time_patch
+          pattern: "**/*/api/ds/query*"
+          middlewares:
+            - type: post_json_patch
+              patch:
+                from: now-24h
+                to: now
+      responses:
+        - type: json_response_saver
+          output_dir: outputs/responses/grafana_page
+          url_keywords:
+            - /api/ds/query
+
+    replay_requests:
+      - name: grafana_search
+        method: GET
+        url: "{{ grafana_url }}/api/search"
+        params:
+          query: redis
