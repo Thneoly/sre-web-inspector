@@ -37,8 +37,15 @@ uv run python run_cninfo.py                         # cninfo announcements
 uv run python run_cninfo.py --exchanges szse bj --max-clicks 5
 
 # Tests
-uv run pytest -v                                    # 314 tests
+uv run pytest -v                                    # 317 tests
 uv run pytest tests/test_template.py -v
+
+# Run examples
+uv run python examples/page_generation.py           # Page generators demo
+uv run python examples/login_flow.py                # Login flow patterns
+uv run python examples/hooks_lifecycle.py           # Lifecycle hooks
+uv run python examples/full_inspection.py           # Complete end-to-end pipeline
+uv run python examples/custom_middleware.py         # Custom middleware
 ```
 
 ## Architecture (quick reference)
@@ -88,7 +95,8 @@ main.py                           # CLI entry, orchestration pipeline
 run_lizhi.py                      # lizhi.shop entry point
 run_cninfo.py                     # cninfo entry point
 config/                           # YAML config files
-tests/                            # pytest (314 tests)
+examples/                         # Runnable example scripts
+tests/                            # pytest (317 tests)
 ```
 
 ## Core pipeline

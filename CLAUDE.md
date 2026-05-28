@@ -81,6 +81,16 @@ main.py                      # CLI entry point (YAML-driven inspection)
 run_lizhi.py                 # CLI entry point (lizhi.shop scraper)
 run_cninfo.py                # CLI entry point (cninfo announcement scraper)
 config/                      # YAML config files
+examples/                    # Runnable example scripts
+
+### Examples
+
+```bash
+uv run python examples/page_generation.py    # Page generators demo
+uv run python examples/login_flow.py         # Login flow patterns
+uv run python examples/hooks_lifecycle.py    # Lifecycle hooks
+uv run python examples/full_inspection.py    # Complete end-to-end pipeline
+uv run python examples/custom_middleware.py  # Custom middleware
 ```
 
 ### Entry point (`main.py`)
