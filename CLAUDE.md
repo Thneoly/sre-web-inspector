@@ -76,7 +76,7 @@ src/
 └── datamarket/              # Business logic
     ├── lizhi_inspector.py   # Lizhi.shop product catalog scraper
     └── cninfo_collector.py  # Cninfo announcement collector (深市/沪市/北交所)
-tests/                       # pytest (249 tests)
+tests/                       # pytest (314 tests)
 main.py                      # CLI entry point (YAML-driven inspection)
 run_lizhi.py                 # CLI entry point (lizhi.shop scraper)
 run_cninfo.py                # CLI entry point (cninfo announcement scraper)
@@ -151,3 +151,86 @@ YAML files → deep_merge → render_value(raw, build_vars(raw)) → expand_page
 ```
 
 `rewrite_output_dirs` patches relative `output_dir` paths inside middleware config to point into `outputs/runs/{run_id}/`.
+
+### Page generators
+
+`page_generators` 从 YAML 内联数据或外部文件批量生成 pages。变量来自顶层 `vars:` 块 + 每行数据的字段。
+
+**`type: ids`** — 内联 ID 列表：
+
+```yaml
+page_generators:
+  - name: pod_pages
+    type: ids
+    id_field: pod
+    ids: [pod-a, pod-b]
+    template:
+      name: "pod_{{ pod }}"
+      url: "{{ base_url }}/k8s/{{ namespace }}/pods/{{ pod }}"
+```
+
+**`type: list`** — 内联 dict 列表：
+
+```yaml
+page_generators:
+  - name: env_pages
+    type: list
+    values:
+      - {env: dev, region: us}
+      - {env: prod, region: eu}
+    template:
+      name: "{{ env }}-dashboard"
+      url: "{{ base_url }}/{{ region }}/{{ env }}/dashboard"
+```
+
+**`type: csv`** — 从 CSV 文件读取（首行为列名），支持 BOM：
+
+```yaml
+page_generators:
+  - name: resource_pages
+    type: csv
+    source: config/resources.csv
+    max_pages: 500
+    template:
+      name: "resource_{{ resource_id }}"
+      url: "{{ base_url }}/ids/{{ resource_id }}/query"
+```
+
+**`type: json`** — 从 JSON 文件读取，可选 `items_path` 定位数组：
+
+```yaml
+# JSON 根为数组：[{"id":"1001"}, {"id":"1002"}]
+page_generators:
+  - name: pod_pages
+    type: json
+    source: config/pods.json
+    template:
+      name: "pod_{{ id }}"
+      url: "{{ base_url }}/pods/{{ id }}"
+
+# JSON 嵌套路径：{"data":{"items":[...]}}
+page_generators:
+  - name: dashboard_pages
+    type: json
+    source: config/dashboards.json
+    items_path: "$.data.items"    # 或 "data.items"
+    template:
+      name: "dashboard_{{ uid }}"
+      url: "{{ grafana_url }}/d/{{ uid }}"
+```
+
+**`type: xlsx`** — 从 Excel 文件读取（首行为列名），可选 `sheet_name`：
+
+```yaml
+page_generators:
+  - name: middleware_pages
+    type: xlsx
+    source: config/middleware.xlsx
+    sheet_name: instances         # 可选，默认为第一个 sheet
+    max_pages: 200
+    template:
+      name: "mw_{{ instance_id }}"
+      url: "{{ base_url }}/middleware/{{ instance_id }}/metrics"
+```
+
+所有类型共用 `max_pages` 上限检查（默认 500）。CSV/JSON/Excel 的 `source` 路径相对于执行 `main.py` 的工作目录。

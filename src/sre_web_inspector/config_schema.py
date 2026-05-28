@@ -176,7 +176,10 @@ class LoginConfig(BaseModel):
 class PageGeneratorConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     name: str
-    type: Literal["list", "ids"] = "list"
+    type: Literal["list", "ids", "csv", "json", "xlsx"] = "list"
+    source: str | None = None
+    items_path: str | None = None
+    sheet_name: str | None = None
     id_field: str = "id"
     ids: list[Any] = Field(default_factory=list)
     values: list[dict[str, Any]] = Field(default_factory=list)

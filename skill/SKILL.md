@@ -37,7 +37,7 @@ uv run python run_cninfo.py                         # cninfo announcements
 uv run python run_cninfo.py --exchanges szse bj --max-clicks 5
 
 # Tests
-uv run pytest -v                                    # 249 tests
+uv run pytest -v                                    # 314 tests
 uv run pytest tests/test_template.py -v
 ```
 
@@ -88,7 +88,7 @@ main.py                           # CLI entry, orchestration pipeline
 run_lizhi.py                      # lizhi.shop entry point
 run_cninfo.py                     # cninfo entry point
 config/                           # YAML config files
-tests/                            # pytest (249 tests)
+tests/                            # pytest (314 tests)
 ```
 
 ## Core pipeline
@@ -245,6 +245,50 @@ await self.inspector.inspect_page(
 - `{{ var }}` in strings, supports dot-path: `{{ nested.key }}`
 - Fullmatch placeholders preserve original type: `"{{ count }}"` with `count: 200` → `int` 200
 - Missing variables log a warning and keep the placeholder text
+
+### Page generators
+
+从内联数据或外部文件批量生成 pages。支持 5 种类型：`ids`、`list`、`csv`、`json`、`xlsx`。
+
+```yaml
+# 内联 ID 列表
+page_generators:
+  - name: pod_pages
+    type: ids
+    id_field: pod
+    ids: [pod-a, pod-b]
+    template:
+      name: "pod_{{ pod }}"
+      url: "{{ base_url }}/pods/{{ pod }}"
+
+# CSV 文件读取（首行为列名）
+  - name: resource_pages
+    type: csv
+    source: config/resources.csv
+    template:
+      name: "{{ resource_id }}"
+      url: "{{ base_url }}/ids/{{ resource_id }}"
+
+# JSON 文件读取（支持 items_path 定位数组）
+  - name: dashboard_pages
+    type: json
+    source: config/dashboards.json
+    items_path: "$.data.items"
+    template:
+      name: "{{ uid }}"
+      url: "{{ grafana_url }}/d/{{ uid }}"
+
+# Excel 文件读取（可选 sheet_name）
+  - name: middleware_pages
+    type: xlsx
+    source: config/instances.xlsx
+    sheet_name: prod
+    template:
+      name: "mw_{{ instance_id }}"
+      url: "{{ base_url }}/middleware/{{ instance_id }}"
+```
+
+所有类型共用 `max_pages` 上限（默认 500）。`source` 路径相对于执行 `main.py` 的工作目录。
 
 ### Retry inheritance
 
