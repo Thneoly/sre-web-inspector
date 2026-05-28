@@ -62,57 +62,173 @@ class TestLizhiInspectorInit:
         assert LizhiInspector._items_key() == "products"
 
 
+# -- locator mock helpers -----------------------------------------------
+
+def _make_card_locator(cards: list[MagicMock]) -> MagicMock:
+    """Return a mock locator whose .all() yields product card elements."""
+    loc = MagicMock()
+    loc.all = AsyncMock(return_value=cards)
+    return loc
+
+
+def _make_card(href: str, text: str, imgs: list[MagicMock] | None = None) -> MagicMock:
+    """Create a mock product card <a> element."""
+    card = MagicMock()
+    card.get_attribute = AsyncMock(return_value=href)
+    card.text_content = AsyncMock(return_value=text)
+    img_loc = MagicMock()
+    img_loc.all = AsyncMock(return_value=imgs or [])
+    card.locator = MagicMock(return_value=img_loc)
+    return card
+
+
+def _make_img(src: str) -> MagicMock:
+    """Create a mock <img> element."""
+    img = MagicMock()
+    img.get_attribute = AsyncMock(return_value=src)
+    return img
+
+
+def _make_body_locator(text: str) -> MagicMock:
+    """Return a mock body locator with inner_text()."""
+    loc = MagicMock()
+    loc.inner_text = AsyncMock(return_value=text)
+    return loc
+
+
+def _make_pagination_locator(texts: list[str]) -> MagicMock:
+    """Return a mock locator whose .all() yields pagination link elements."""
+    links = []
+    for t in texts:
+        link = MagicMock()
+        link.text_content = AsyncMock(return_value=t)
+        links.append(link)
+    loc = MagicMock()
+    loc.all = AsyncMock(return_value=links)
+    return loc
+
+
+# -- page.locator dispatcher --------------------------------------------
+
+def _make_page_locator(cards_loc=None, body_loc=None, pagination_loc=None):
+    """Return a mock for page.locator that dispatches by selector."""
+    def _dispatch(selector: str) -> MagicMock:
+        if 'href^="/products/"' in selector or 'href^="/p/"' in selector:
+            return cards_loc or _make_card_locator([])
+        if selector == "body":
+            return body_loc or _make_body_locator("")
+        if "pagination" in selector:
+            return pagination_loc or _make_pagination_locator([])
+        return MagicMock()
+    return MagicMock(side_effect=_dispatch)
+
+
 class TestExtractProducts:
     @pytest.mark.asyncio
     async def test_extract_products_empty_page(self):
         cm = MagicMock(spec=BrowserContextManager)
         inspector = LizhiInspector(cm, run_ctx=RunContext.create())
         mock_page = MagicMock()
-        mock_page.evaluate = AsyncMock(return_value=[])
+        mock_page.locator = MagicMock(return_value=_make_card_locator([]))
         result = await inspector._extract_products(mock_page)
         assert result == []
 
     @pytest.mark.asyncio
-    async def test_extract_products_returns_none(self):
+    async def test_extract_products_locator_failure(self):
         cm = MagicMock(spec=BrowserContextManager)
         inspector = LizhiInspector(cm, run_ctx=RunContext.create())
         mock_page = MagicMock()
-        mock_page.evaluate = AsyncMock(return_value=None)
+        mock_page.locator = MagicMock(side_effect=Exception("DOM error"))
         result = await inspector._extract_products(mock_page)
         assert result == []
 
     @pytest.mark.asyncio
-    async def test_extract_products_returns_dict(self):
+    async def test_extract_products_card_failure_skips(self):
+        """A single card that raises during extraction should be skipped."""
         cm = MagicMock(spec=BrowserContextManager)
         inspector = LizhiInspector(cm, run_ctx=RunContext.create())
+
+        bad_card = MagicMock()
+        bad_card.get_attribute = AsyncMock(side_effect=Exception("broken card"))
+        good_card = _make_card("/products/app", "App ￥99", imgs=[])
+
         mock_page = MagicMock()
-        mock_page.evaluate = AsyncMock(return_value={"a": 1})
+        mock_page.locator = MagicMock(return_value=_make_card_locator([bad_card, good_card]))
+        result = await inspector._extract_products(mock_page)
+        assert len(result) == 1
+        assert result[0]["name"] == "App"
+
+    @pytest.mark.asyncio
+    async def test_extract_products_skips_empty_href(self):
+        cm = MagicMock(spec=BrowserContextManager)
+        inspector = LizhiInspector(cm, run_ctx=RunContext.create())
+
+        card = _make_card("", "Some text", imgs=[])
+        mock_page = MagicMock()
+        mock_page.locator = MagicMock(return_value=_make_card_locator([card]))
         result = await inspector._extract_products(mock_page)
         assert result == []
 
     @pytest.mark.asyncio
-    async def test_extract_products_exception(self):
+    async def test_extract_products_dedup_by_href(self):
         cm = MagicMock(spec=BrowserContextManager)
         inspector = LizhiInspector(cm, run_ctx=RunContext.create())
+
+        card1 = _make_card("/products/app", "App ￥99", imgs=[])
+        card2 = _make_card("/products/app", "App Dup ￥149", imgs=[])
         mock_page = MagicMock()
-        mock_page.evaluate = AsyncMock(side_effect=Exception("eval failed"))
+        mock_page.locator = MagicMock(return_value=_make_card_locator([card1, card2]))
         result = await inspector._extract_products(mock_page)
-        assert result == []
+        assert len(result) == 1
 
     @pytest.mark.asyncio
     async def test_extract_products_success(self):
         cm = MagicMock(spec=BrowserContextManager)
         inspector = LizhiInspector(cm, run_ctx=RunContext.create())
+
+        img = _make_img("https://img.example.com/app.png")
+        platform_img = _make_img("https://img.example.com/icon-windows.svg")
+        card = _make_card(
+            "/products/app",
+            "1. App - A great tool ￥99 ￥199",
+            imgs=[img, platform_img],
+        )
+
         mock_page = MagicMock()
-        raw = [
-            {"name": "App", "url": f"{BASE_URL}/products/app", "price": "99",
-             "original_price": "199", "description": "desc", "image_url": "img.png",
-             "platforms": ["macOS"], "product_type": "product"},
-        ]
-        mock_page.evaluate = AsyncMock(return_value=raw)
+        mock_page.locator = MagicMock(return_value=_make_card_locator([card]))
         result = await inspector._extract_products(mock_page)
         assert len(result) == 1
         assert result[0]["name"] == "App"
+        assert result[0]["url"] == f"{BASE_URL}/products/app"
+        assert result[0]["price"] == "99"
+        assert result[0]["original_price"] == "199"
+        assert result[0]["description"] == "A great tool"
+        assert result[0]["image_url"] == "https://img.example.com/app.png"
+        assert "Windows" in result[0]["platforms"]
+        assert result[0]["product_type"] == "product"
+
+    @pytest.mark.asyncio
+    async def test_extract_products_bundle_type(self):
+        cm = MagicMock(spec=BrowserContextManager)
+        inspector = LizhiInspector(cm, run_ctx=RunContext.create())
+
+        card = _make_card("/p/bundle1", "Bundle Deal ￥299", imgs=[])
+        mock_page = MagicMock()
+        mock_page.locator = MagicMock(return_value=_make_card_locator([card]))
+        result = await inspector._extract_products(mock_page)
+        assert len(result) == 1
+        assert result[0]["product_type"] == "bundle"
+
+    @pytest.mark.asyncio
+    async def test_extract_products_skips_short_name(self):
+        cm = MagicMock(spec=BrowserContextManager)
+        inspector = LizhiInspector(cm, run_ctx=RunContext.create())
+
+        card = _make_card("/products/x", "X", imgs=[])
+        mock_page = MagicMock()
+        mock_page.locator = MagicMock(return_value=_make_card_locator([card]))
+        result = await inspector._extract_products(mock_page)
+        assert result == []
 
 
 class TestGetPageInfo:
@@ -121,28 +237,42 @@ class TestGetPageInfo:
         cm = MagicMock(spec=BrowserContextManager)
         inspector = LizhiInspector(cm, run_ctx=RunContext.create())
         mock_page = MagicMock()
-        mock_page.evaluate = AsyncMock(return_value={"total": 378, "maxPage": 19, "expectedPages": 19})
+
+        mock_page.locator = _make_page_locator(
+            body_loc=_make_body_locator("共 378 件商品"),
+            pagination_loc=_make_pagination_locator(["1", "2", "...", "19"]),
+        )
+
         info = await inspector._get_page_info(mock_page)
         assert info["total"] == 378
+        assert info["maxPage"] == 19
         assert info["expectedPages"] == 19
 
     @pytest.mark.asyncio
-    async def test_get_page_info_exception(self):
+    async def test_get_page_info_body_failure(self):
         cm = MagicMock(spec=BrowserContextManager)
         inspector = LizhiInspector(cm, run_ctx=RunContext.create())
         mock_page = MagicMock()
-        mock_page.evaluate = AsyncMock(side_effect=Exception("eval failed"))
+        mock_page.locator = MagicMock(side_effect=Exception("locator error"))
+
         info = await inspector._get_page_info(mock_page)
         assert info == {"total": 0, "maxPage": 1}
 
     @pytest.mark.asyncio
-    async def test_get_page_info_returns_list(self):
+    async def test_get_page_info_no_pagination_links(self):
         cm = MagicMock(spec=BrowserContextManager)
         inspector = LizhiInspector(cm, run_ctx=RunContext.create())
         mock_page = MagicMock()
-        mock_page.evaluate = AsyncMock(return_value=[1, 2, 3])
+
+        mock_page.locator = _make_page_locator(
+            body_loc=_make_body_locator("共 15 件商品"),
+            pagination_loc=_make_pagination_locator([]),
+        )
+
         info = await inspector._get_page_info(mock_page)
-        assert info == {"total": 0, "maxPage": 1}
+        assert info["total"] == 15
+        assert info["maxPage"] == 1
+        assert info["expectedPages"] == 1  # ceil(15/20) = 1
 
 
 class TestScrapeListingPage:
@@ -151,11 +281,8 @@ class TestScrapeListingPage:
         cm = MagicMock(spec=BrowserContextManager)
         cm.context = MagicMock()
         mock_page = MagicMock()
-        mock_page.evaluate = AsyncMock(return_value=[
-            {"name": "App", "url": f"{BASE_URL}/products/app", "price": "99",
-             "original_price": "", "description": "", "image_url": "",
-             "platforms": [], "product_type": "product"},
-        ])
+        card = _make_card("/products/app", "App ￥99", imgs=[])
+        mock_page.locator = MagicMock(return_value=_make_card_locator([card]))
         cm.page = mock_page
 
         run_ctx = RunContext.create(base_output_dir=str(tmp_path), run_id="test-001")
@@ -175,16 +302,17 @@ class TestCollect:
     async def test_collect_single_page(self, tmp_path):
         cm = MagicMock(spec=BrowserContextManager)
         cm.context = MagicMock()
-        mock_page = MagicMock()
-        mock_page.evaluate = AsyncMock(side_effect=[
-            [{"name": "App", "url": f"{BASE_URL}/products/app", "price": "10",
-              "original_price": "", "description": "", "image_url": "",
-              "platforms": [], "product_type": "product"}],
-            {"total": 20, "maxPage": 1, "expectedPages": 1},
-        ])
-        cm.page = mock_page
-        cm.new_page = AsyncMock()
         cm.clear_network_records = MagicMock()
+        cm.new_page = AsyncMock()
+
+        card = _make_card("/products/app", "App ￥10", imgs=[])
+        mock_page = MagicMock()
+        mock_page.locator = _make_page_locator(
+            cards_loc=_make_card_locator([card]),
+            body_loc=_make_body_locator("共 20 件商品"),
+            pagination_loc=_make_pagination_locator(["1"]),
+        )
+        cm.page = mock_page
 
         run_ctx = RunContext.create(base_output_dir=str(tmp_path), run_id="test-001")
         inspector = LizhiInspector(cm, run_ctx=run_ctx, retry_policy=RetryPolicy(times=1), timeout=10000)
@@ -227,10 +355,6 @@ class TestRunLizhiInspector:
             mock_cm.__aexit__ = AsyncMock(return_value=None)
             mock_cm.context = MagicMock()
             mock_page = MagicMock()
-            mock_page.evaluate = AsyncMock(side_effect=[
-                [],
-                {"total": 0, "maxPage": 1, "expectedPages": 1},
-            ])
             mock_cm.page = mock_page
             mock_cm.new_page = AsyncMock()
             mock_cm.clear_network_records = MagicMock()
@@ -255,13 +379,13 @@ class TestErrorResilience:
         cm.clear_network_records = MagicMock()
         cm.new_page = AsyncMock()
 
+        card = _make_card("/p1", "App1 ￥10", imgs=[])
         mock_page = MagicMock()
-        mock_page.evaluate = AsyncMock(side_effect=[
-            [{"name": "App1", "url": f"{BASE_URL}/p1", "price": "10",
-              "original_price": "", "description": "", "image_url": "",
-              "platforms": [], "product_type": "product"}],
-            {"total": 40, "maxPage": 2, "expectedPages": 2},
-        ])
+        mock_page.locator = _make_page_locator(
+            cards_loc=_make_card_locator([card]),
+            body_loc=_make_body_locator("共 40 件商品"),
+            pagination_loc=_make_pagination_locator(["1", "2"]),
+        )
         cm.page = mock_page
 
         run_ctx = RunContext.create(base_output_dir=str(tmp_path), run_id="test-001")

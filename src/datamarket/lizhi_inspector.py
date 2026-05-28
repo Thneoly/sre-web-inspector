@@ -3,6 +3,7 @@
 Uses:
 - BrowserContextManager for browser lifecycle
 - WebInspectionNode for page navigation + evidence collection
+- Playwright native locators for DOM extraction (no injected JS)
 - ApiCapture for in-memory JSON response interception
 - RequestReplayer for direct API calls with browser auth
 - RunContext for organized output directories
@@ -15,10 +16,12 @@ Uses:
 from __future__ import annotations
 
 import logging
+import math
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from playwright.async_api import Page
+from playwright.async_api import Locator, Page
 
 from sre_web_inspector.api_capture import ApiCapture
 from sre_web_inspector.base_collector import BaseCollector
@@ -33,6 +36,18 @@ from sre_web_inspector.template import render_value
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://lizhi.shop"
+
+_PLATFORM_MAP = {
+    "apple": "macOS",
+    "appstore": "iOS",
+    "windows": "Windows",
+    "android": "Android",
+    "linux": "Linux",
+    "web_app": "Web",
+}
+
+_PRICE_RE = re.compile(r"￥([\d,.]+)")
+_PRODUCT_CARD_SELECTOR = 'a[href^="/products/"], a[href^="/p/"]'
 
 
 @dataclass
@@ -61,88 +76,6 @@ class SoftwareInfo:
         }
 
 
-_EXTRACT_SCRIPT = r"""
-(() => {
-    const BASE = 'https://lizhi.shop';
-    const platformMap = {
-        'apple': 'macOS', 'appstore': 'iOS', 'windows': 'Windows',
-        'android': 'Android', 'linux': 'Linux', 'web_app': 'Web'
-    };
-
-    const cards = document.querySelectorAll('a[href^="/products/"], a[href^="/p/"]');
-    const seen = new Set();
-    const results = [];
-
-    for (const card of cards) {
-        const href = card.getAttribute('href') || '';
-        if (seen.has(href)) continue;
-        seen.add(href);
-
-        const text = (card.textContent || '').replace(/\s+/g, ' ').trim();
-        const imgs = card.querySelectorAll('img');
-
-        let imageUrl = '';
-        if (imgs.length > 0) {
-            imageUrl = imgs[0].getAttribute('src') || '';
-        }
-
-        const platforms = [];
-        for (let i = 1; i < imgs.length; i++) {
-            const src = (imgs[i].getAttribute('src') || '').toLowerCase();
-            for (const [key, label] of Object.entries(platformMap)) {
-                if (src.includes(key)) platforms.push(label);
-            }
-        }
-
-        const priceMatches = [...text.matchAll(/￥([\d,.]+)/g)];
-        const price = priceMatches.length > 0 ? priceMatches[0][1] : '';
-        const originalPrice = priceMatches.length > 1 ? priceMatches[1][1] : '';
-
-        const priceIdx = text.indexOf('￥');
-        const nameDesc = priceIdx > 0 ? text.substring(0, priceIdx).trim() : text;
-
-        let name = nameDesc;
-        let description = '';
-        const sep = nameDesc.includes(' - ') ? ' - ' : (nameDesc.includes(' — ') ? ' — ' : '');
-        if (sep) {
-            const parts = nameDesc.split(sep);
-            name = parts[0].trim();
-            description = parts.slice(1).join(sep).trim();
-        }
-
-        name = name.replace(/^\d+\.\s*/, '').trim();
-        if (name.length < 2) continue;
-
-        const productType = href.startsWith('/p/') ? 'bundle' : 'product';
-        const fullUrl = BASE + href;
-
-        results.push({
-            name, url: fullUrl, price, original_price: originalPrice,
-            description, image_url: imageUrl, platforms, product_type: productType
-        });
-    }
-    return results;
-})()
-"""
-
-_PAGE_INFO_SCRIPT = r"""
-(() => {
-    const header = document.body.textContent || '';
-    const match = header.match(/共\s*(\d+)\s*件商品/);
-    const total = match ? parseInt(match[1]) : 0;
-
-    const pageLinks = document.querySelectorAll('.pagination a, [class*="pagination"] a, nav a[href*="page="]');
-    let maxPage = 1;
-    for (const link of pageLinks) {
-        const num = parseInt(link.textContent.trim());
-        if (!isNaN(num) && num > maxPage) maxPage = num;
-    }
-
-    return { total, maxPage, expectedPages: Math.ceil(total / 20) };
-})()
-"""
-
-
 class LizhiInspector(BaseCollector[SoftwareInfo]):
     """Scrape lizhi.shop using sre_web_inspector components."""
 
@@ -156,19 +89,114 @@ class LizhiInspector(BaseCollector[SoftwareInfo]):
         self.replayer: RequestReplayer | None = None
 
     async def _extract_products(self, page: Page) -> list[dict[str, Any]]:
+        """Extract product cards from DOM using Playwright native locators."""
         try:
-            raw = await page.evaluate(_EXTRACT_SCRIPT)
-            return raw if isinstance(raw, list) else []
+            cards = await page.locator(_PRODUCT_CARD_SELECTOR).all()
         except Exception:
-            logger.warning("DOM extraction failed", exc_info=True)
+            logger.warning("DOM extraction failed: could not locate product cards", exc_info=True)
             return []
 
+        seen: set[str] = set()
+        results: list[dict[str, Any]] = []
+
+        for card in cards:
+            try:
+                href = (await card.get_attribute("href")) or ""
+                if not href or href in seen:
+                    continue
+                seen.add(href)
+
+                text_raw = (await card.text_content()) or ""
+                text = " ".join(text_raw.split())
+
+                imgs = await card.locator("img").all()
+
+                image_url = ""
+                if imgs:
+                    image_url = (await imgs[0].get_attribute("src")) or ""
+
+                platforms = await self._detect_platforms(imgs)
+
+                prices = _PRICE_RE.findall(text)
+                price = prices[0] if prices else ""
+                original_price = prices[1] if len(prices) > 1 else ""
+
+                price_idx = text.index("￥") if "￥" in text else -1
+                name_desc = text[:price_idx].strip() if price_idx > 0 else text
+
+                name = name_desc
+                description = ""
+                sep = ""
+                if " - " in name_desc:
+                    sep = " - "
+                elif " — " in name_desc:
+                    sep = " — "
+                if sep:
+                    parts = name_desc.split(sep, 1)
+                    name = parts[0].strip()
+                    description = parts[1].strip() if len(parts) > 1 else ""
+
+                name = re.sub(r"^\d+\.\s*", "", name).strip()
+                if len(name) < 2:
+                    continue
+
+                product_type = "bundle" if href.startswith("/p/") else "product"
+                full_url = BASE_URL + href
+
+                results.append({
+                    "name": name,
+                    "url": full_url,
+                    "price": price,
+                    "original_price": original_price,
+                    "description": description,
+                    "image_url": image_url,
+                    "platforms": platforms,
+                    "product_type": product_type,
+                })
+            except Exception:
+                logger.debug("Failed to extract product card", exc_info=True)
+                continue
+
+        return results
+
+    @staticmethod
+    async def _detect_platforms(imgs: list[Locator]) -> list[str]:
+        """Detect platform labels from image src keywords (images beyond the first)."""
+        platforms: list[str] = []
+        for img in imgs[1:]:
+            src = ((await img.get_attribute("src")) or "").lower()
+            for key, label in _PLATFORM_MAP.items():
+                if key in src and label not in platforms:
+                    platforms.append(label)
+        return platforms
+
     async def _get_page_info(self, page: Page) -> dict[str, Any]:
+        """Extract pagination info from DOM using Playwright native locators."""
         try:
-            info = await page.evaluate(_PAGE_INFO_SCRIPT)
-            return info if isinstance(info, dict) else {"total": 0, "maxPage": 1}
+            body_text = await page.locator("body").inner_text()
         except Exception:
             return {"total": 0, "maxPage": 1}
+
+        match = re.search(r"共\s*(\d+)\s*件商品", body_text)
+        total = int(match.group(1)) if match else 0
+
+        max_page = 1
+        try:
+            pagination_links = await page.locator(
+                '.pagination a, [class*="pagination"] a, nav a[href*="page="]'
+            ).all()
+            for link in pagination_links:
+                try:
+                    num = int((await link.text_content()).strip())
+                    if num > max_page:
+                        max_page = num
+                except (ValueError, TypeError):
+                    continue
+        except Exception:
+            logger.debug("Could not extract pagination links", exc_info=True)
+
+        expected_pages = math.ceil(total / 20) if total > 0 else max_page
+        return {"total": total, "maxPage": max_page, "expectedPages": expected_pages}
 
     async def _replay_api(
         self,
