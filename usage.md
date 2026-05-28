@@ -200,7 +200,236 @@ outputs/runs/{run_id}/replay/pod_page/pre/pod_options.json
 outputs/runs/{run_id}/replay/pod_page/pod_full_list.json
 ```
 
-## 10. Middleware scope
+## 10. 登录流程（Login）
+
+登录流程在所有 page 巡检之前执行，确保 replay 和 page inspection 使用已认证的 context。
+
+### 10.1 手动登录
+
+适合有验证码、MFA、扫码等复杂认证的系统。
+
+```yaml
+login:
+  enabled: true
+  mode: manual
+  login_url: "{{ base_url }}/login"
+
+  # 检测是否已登录
+  check:
+    type: selector              # none / selector / api / cookie / url_contains
+    url: "{{ base_url }}/home"
+    selector: ".user-avatar"
+    timeout: 10000
+
+  manual:
+    wait_timeout: 120000        # 等待用户手动登录的超时时间 (ms)
+    success_selector: ".user-avatar"
+    success_url_contains: "/home"
+
+  on_failure: stop              # stop 或 continue
+
+  # 登录证据留存
+  evidence:
+    screenshot_before: true
+    screenshot_after: true
+    save_storage_state: true
+```
+
+### 10.2 表单自动登录
+
+适合简单的用户名+密码登录。
+
+```yaml
+login:
+  enabled: true
+  mode: form
+  login_url: "{{ base_url }}/login"
+
+  check:
+    type: api
+    url: "{{ base_url }}/api/current-user"
+    expect_status: 200
+
+  form:
+    username_selector: "input[name='username']"
+    password_selector: "input[name='password']"
+    submit_selector: "button[type='submit']"
+    username: "{{ env.USERNAME }}"
+    password: "{{ env.PASSWORD }}"
+    after_submit:
+      wait_for_url_contains: "/home"
+      wait_for_selector: ".user-avatar"
+      timeout: 30000
+```
+
+### 10.3 Cookie 注入
+
+适合已有 token / session 的场景。
+
+```yaml
+login:
+  enabled: true
+  mode: cookie
+  cookies:
+    - name: SESSION
+      value: "{{ env.SESSION }}"
+      domain: "example.com"
+    - name: XSRF-TOKEN
+      value: "{{ env.CSRF }}"
+      domain: "example.com"
+
+  check:
+    type: api
+    url: "{{ base_url }}/api/me"
+    expect_status: 200
+```
+
+### 10.4 登录态检查方式
+
+支持 5 种检查类型：
+
+| type | 说明 | 关键参数 |
+|------|------|---------|
+| `selector` | 访问 URL，检查 DOM 元素存在 | `url`, `selector` |
+| `api` | 请求 API，检查返回状态码 | `url`, `expect_status` |
+| `cookie` | 检查指定 Cookie 是否存在 | `cookie_name` |
+| `url_contains` | 访问 URL，检查当前 URL 是否包含指定字符串 | `url`, `selector`（匹配 URL 内容） |
+| `none` | 不检查，直接执行登录 | - |
+
+### 10.5 登录失败策略
+
+| on_failure | 行为 |
+|-----------|------|
+| `stop` | 登录失败抛 RuntimeError，停止巡检 |
+| `continue` | 登录失败继续执行后续 replay/pages（可能因未认证而失败） |
+
+### 10.6 执行顺序
+
+```
+Context Middleware → on_browser_start hook → LoginFlow → Global Replay → Pages
+```
+
+## 11. 动态页面生成（Page Generators）
+
+按模板和变量列表批量生成 pages，适合批量资源巡检。
+
+### 11.1 ID 列表模式
+
+```yaml
+page_generators:
+  - name: id_巡检
+    type: ids
+    id_field: id              # 变量名，默认 id
+    ids:                      # 需巡检的 ID 列表
+      - 1001
+      - 1002
+      - 1003
+    max_pages: 500            # 生成页面上限，防止配置错误
+    template:
+      name: "资源_{{ id }}"
+      url: "{{ base_url }}/ids/{{ id }}/query"
+      screenshot: true
+      save_html: true
+```
+
+展开为 3 个 page：
+
+```yaml
+pages:
+  - name: 资源_1001
+    url: https://example.com/ids/1001/query
+  - name: 资源_1002
+    url: https://example.com/ids/1002/query
+  - name: 资源_1003
+    url: https://example.com/ids/1003/query
+```
+
+### 11.2 多值列表模式
+
+每个 value dict 的 key 可作为模板变量。
+
+```yaml
+page_generators:
+  - name: 多环境面板
+    type: list
+    values:
+      - env: dev
+        cluster: k8s-us
+      - env: prod
+        cluster: k8s-eu
+    template:
+      name: "{{ env }}-{{ cluster }}"
+      url: "{{ base_url }}/dashboards/{{ env }}/{{ cluster }}"
+      network_middlewares:
+        routes:
+          - name: patch_{{ env }}
+            pattern: "**/*/api/{{ env }}*"
+            middlewares:
+              - type: query_param_patch
+                set:
+                  env: "{{ env }}"
+```
+
+### 11.3 与静态 pages 组合
+
+同时配置静态 pages 和 page_generators：
+
+```yaml
+pages:
+  - name: 首页
+    url: "{{ base_url }}/home"
+
+page_generators:
+  - name: pod_巡检
+    type: ids
+    ids: [pod-a, pod-b]
+    template:
+      name: "pod_{{ id }}"
+      url: "{{ base_url }}/k8s/{{ namespace }}/pods/{{ id }}"
+```
+
+结果：首页 + pod-a + pod-b，共 3 个 page。
+
+### 11.4 生成页面支持全部功能
+
+动态生成的 pages 与静态 pages 完全等价，支持：
+
+- `network_middlewares`
+- `pre_replay_requests` / `replay_requests`
+- `wait_for_requests` / `wait_for_responses`
+- `timeout` / `retry`
+- `lifecycle` / `hooks`
+- `screenshot` / `save_html` / `save_network`
+
+### 11.5 多份配置合并
+
+和 pages 一样，支持 `--config` 多文件合并：
+
+```bash
+uv run python main.py --config base.yaml --config gen_pages.yaml
+```
+
+lists 会合并串联，dict 会深层合并。
+
+```yaml
+# base.yaml
+pages:
+  - name: home
+    url: https://example.com
+
+# gen_pages.yaml
+page_generators:
+  - name: dyn
+    type: ids
+    ids: [1, 2]
+    template:
+      name: "p{{ id }}"
+      url: "https://example.com/{{ id }}"
+```
+
+合并后 pages 共 3 个（1 静态 + 2 动态）。
+
+## 12. Middleware scope
 
 ```yaml
 context_middlewares:

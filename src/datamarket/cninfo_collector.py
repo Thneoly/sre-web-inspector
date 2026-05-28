@@ -6,10 +6,12 @@ combined with Playwright Python locators for DOM interaction.
 
 Uses:
   - BrowserContextManager   → browser lifecycle
-  - WebInspectionNode       → page navigation + evidence
-  - ApiCapture              → in-memory JSON response interception
+  - WebInspectionNode       → page navigation + evidence (screenshots, HTML, network)
+  - ApiCapture              → in-memory JSON response interception (keyword-filtered)
+  - RequestReplayer         → direct API calls reusing browser auth
   - paginate_by_click       → click-based pagination
   - run_with_retry          → robust page visits & clicks
+  - run_hooks               → lifecycle shell commands
   - BaseCollector           → shared lifecycle (RunContext, reporter, dedup)
 """
 from __future__ import annotations
@@ -25,7 +27,9 @@ from playwright.async_api import Page
 from sre_web_inspector.api_capture import ApiCapture
 from sre_web_inspector.base_collector import BaseCollector
 from sre_web_inspector.browser_context import BrowserContextManager
+from sre_web_inspector.hooks import HookConfig, run_hooks
 from sre_web_inspector.paginator import paginate_by_click
+from sre_web_inspector.request_replayer import RequestReplayer
 from sre_web_inspector.retry import RetryPolicy, run_with_retry
 from sre_web_inspector.run_context import RunContext
 
@@ -43,10 +47,15 @@ EXCHANGES = {
 
 PAGE_URL = f"{BASE_URL}/new/commonUrl?url=disclosure/list/notice"
 
+# Known API URL keywords for cninfo announcement data.
+_API_KEYWORDS = ["classifiedAnnouncements", "announcements", "announcement"]
+_API_EXCLUDE = [".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".woff", ".css", ".js"]
+
 
 @dataclass
 class Announcement:
     """Single announcement record."""
+
     sec_code: str = ""
     sec_name: str = ""
     title: str = ""
@@ -72,7 +81,12 @@ class CninfoCollector(BaseCollector[Announcement]):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self.api_capture = ApiCapture()
+        self.api_capture = ApiCapture(
+            url_keywords=_API_KEYWORDS,
+            url_exclude=_API_EXCLUDE,
+            max_captures=500,
+        )
+        self.replayer: RequestReplayer | None = None
 
     # -- DOM extraction ---------------------------------------------------
 
@@ -149,6 +163,18 @@ class CninfoCollector(BaseCollector[Announcement]):
 
         for capture in self.api_capture.responses:
             data = capture.get("data", {})
+
+            # Direct list response (e.g. [{...}, {...}])
+            if isinstance(data, list):
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    ann = self._parse_api_item(item)
+                    if ann and ann.announcement_id and ann.announcement_id not in seen_ids:
+                        seen_ids.add(ann.announcement_id)
+                        announcements.append(ann)
+                continue
+
             if not isinstance(data, dict):
                 continue
 
@@ -172,8 +198,8 @@ class CninfoCollector(BaseCollector[Announcement]):
                 if key in data and isinstance(data[key], list):
                     items = data[key]
                     break
-            if not items and isinstance(data, list):
-                items = data
+            if not items:
+                continue
 
             for item in items:
                 if not isinstance(item, dict):
@@ -212,6 +238,62 @@ class CninfoCollector(BaseCollector[Announcement]):
         )
         return ann if ann.title else None
 
+    # -- API replay -------------------------------------------------------
+
+    async def _replay_announcement_api(
+        self,
+        exchange_name: str,
+        tab: str,
+        *,
+        page_num: int = 1,
+        page_size: int = 30,
+    ) -> list[Announcement]:
+        """Replay the announcement API directly via browser auth context."""
+        if self.replayer is None:
+            if self.cm.context is None:
+                return []
+            self.replayer = RequestReplayer(
+                self.cm.context,
+                output_dir=self.output_dir / "replay" / "cninfo",
+                save_response=True,
+            )
+        try:
+            result = await self.replayer.post_json(
+                f"{BASE_URL}/new/disclosure",
+                name=f"announcement_{exchange_name}_{page_num:03d}",
+                data={
+                    "stock": "",
+                    "searchkey": "",
+                    "category": "",
+                    "pageNum": page_num,
+                    "pageSize": page_size,
+                    "column": tab,
+                    "tabName": "fulltext",
+                    "sortName": "",
+                    "sortType": "",
+                    "isHLtitle": True,
+                },
+            )
+            if isinstance(result.data, dict):
+                announcements: list[Announcement] = []
+                groups = result.data.get("classifiedAnnouncements")
+                if isinstance(groups, list):
+                    for group in groups:
+                        if not isinstance(group, list):
+                            continue
+                        for item in group:
+                            if not isinstance(item, dict):
+                                continue
+                            ann = self._parse_api_item(item)
+                            if ann:
+                                ann.exchange = exchange_name
+                                announcements.append(ann)
+                return announcements
+            return []
+        except Exception:
+            logger.debug("API replay failed for %s", exchange_name, exc_info=True)
+            return []
+
     # -- collection -------------------------------------------------------
 
     async def _collect_one_exchange(
@@ -220,21 +302,29 @@ class CninfoCollector(BaseCollector[Announcement]):
         tab: str,
         page: Page,
         max_clicks: int,
+        *,
+        screenshot: bool = True,
+        save_html: bool = True,
+        save_network: bool = True,
     ) -> list[Announcement]:
         """Collect announcements for one exchange using ApiCapture + pagination."""
         url = f"{PAGE_URL}#{tab}"
         logger.info("Navigating to %s (%s)", exchange_name, url)
 
-        await page.goto(url, wait_until="domcontentloaded", timeout=self.timeout)
-        try:
-            await page.wait_for_load_state("networkidle", timeout=self.timeout)
-        except Exception:
-            pass
-        try:
-            await page.wait_for_selector('a[href*="announcementId"]', timeout=10000)
-        except Exception:
-            pass
-        await page.wait_for_timeout(1000)
+        await self.inspector.inspect_page(
+            url,
+            page=page,
+            name=f"cninfo_{tab}",
+            output_dir=self.output_dir,
+            screenshot=screenshot,
+            save_html=save_html,
+            save_network=save_network,
+            timeout=self.timeout,
+            wait_for_network_idle=True,
+            network_idle_timeout=self.timeout,
+            wait_for_selector='a[href*="announcementId"]',
+            wait_ms=1000,
+        )
 
         all_anns: list[Announcement] = []
         seen_ids: set[str] = set()
@@ -272,6 +362,9 @@ class CninfoCollector(BaseCollector[Announcement]):
         *,
         exchanges: list[str] | None = None,
         max_clicks_per_exchange: int = 10,
+        screenshot: bool = True,
+        save_html: bool = True,
+        save_network: bool = True,
     ) -> list[Announcement]:
         if exchanges is None:
             exchanges = list(EXCHANGES.keys())
@@ -290,12 +383,31 @@ class CninfoCollector(BaseCollector[Announcement]):
                 anns = await run_with_retry(
                     lambda: self._collect_one_exchange(
                         info["name"], info["tab"], page, max_clicks_per_exchange,
+                        screenshot=screenshot, save_html=save_html, save_network=save_network,
                     ),
                     policy=self.retry_policy,
                     name=f"collect_{key}",
                 )
                 self.results.extend(anns)
                 logger.info("Collected %d announcements from %s", len(anns), info["name"])
+
+                # Try API replay as complementary data source
+                try:
+                    replay_anns = await self._replay_announcement_api(info["name"], info["tab"])
+                    replay_new = 0
+                    existing_ids = {a.announcement_id for a in self.results if a.announcement_id}
+                    for ann in replay_anns:
+                        if ann.announcement_id and ann.announcement_id not in existing_ids:
+                            existing_ids.add(ann.announcement_id)
+                            self.results.append(ann)
+                            replay_new += 1
+                    if replay_new:
+                        logger.info("API replay added %d new announcements from %s", replay_new, info["name"])
+                except Exception:
+                    logger.debug("API replay failed for %s", info["name"], exc_info=True)
+
+            except Exception:
+                logger.warning("Failed to collect from %s, continuing", info["name"], exc_info=True)
             finally:
                 self.api_capture.detach(page)
                 await page.close()
@@ -308,23 +420,31 @@ class CninfoCollector(BaseCollector[Announcement]):
     def _items_key() -> str:
         return "announcements"
 
-    def save_results(self) -> dict[str, Any]:
-        """Save results with exchange breakdown."""
+    def save_results(
+        self,
+        *,
+        filename: str = "cninfo_announcements.json",
+        dedup_key: Any = None,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        """Save results with exchange breakdown and API captures."""
         by_exchange: dict[str, int] = {}
         for a in self.results:
             by_exchange[a.exchange] = by_exchange.get(a.exchange, 0) + 1
 
-        dedup_key = lambda a: f"{a.sec_code}:{a.announcement_id}"  # noqa: E731
+        if dedup_key is None:
+            dedup_key = lambda a: f"{a.sec_code}:{a.announcement_id}"  # noqa: E731
 
         return super().save_results(
             kind="CninfoAnnouncementCollection",
-            filename="cninfo_announcements.json",
+            filename=filename,
             dedup_key=dedup_key,
             api_captures=self.api_capture.responses,
             api_filename="cninfo_api_captures.json",
             source=BASE_URL,
             exchanges=list(EXCHANGES.keys()),
             by_exchange=by_exchange,
+            **extra,
         )
 
 
@@ -334,10 +454,15 @@ async def run_cninfo_collector(
     output_dir: str = "outputs",
     exchanges: list[str] | None = None,
     max_clicks: int = 10,
+    screenshot: bool = True,
+    save_html: bool = True,
+    save_network: bool = True,
     user_data_dir: str | None = None,
     retry_times: int = 3,
     retry_interval_ms: int = 2000,
     timeout: int = 30000,
+    hook_start: list[str] | None = None,
+    hook_complete: list[str] | None = None,
 ) -> tuple[list[Announcement], dict[str, Any]]:
     browser_kwargs: dict[str, Any] = {
         "headless": headless,
@@ -353,7 +478,27 @@ async def run_cninfo_collector(
         retry = RetryPolicy(times=retry_times, interval_ms=retry_interval_ms)
         run_ctx = RunContext.create(base_output_dir=output_dir)
 
+        if hook_start:
+            await run_hooks(
+                HookConfig(commands=hook_start),
+                env={"SRE_RUN_ID": run_ctx.run_id, "SRE_OUTPUT_DIR": str(run_ctx.output_dir)},
+            )
+
         collector = CninfoCollector(cm, run_ctx=run_ctx, retry_policy=retry, timeout=timeout)
-        products = await collector.collect(exchanges=exchanges, max_clicks_per_exchange=max_clicks)
+        products = await collector.collect(
+            exchanges=exchanges, max_clicks_per_exchange=max_clicks,
+            screenshot=screenshot, save_html=save_html, save_network=save_network,
+        )
         summary = collector.save_results()
+
+        if hook_complete:
+            await run_hooks(
+                HookConfig(commands=hook_complete),
+                env={
+                    "SRE_RUN_ID": run_ctx.run_id,
+                    "SRE_OUTPUT_DIR": str(run_ctx.output_dir),
+                    "SRE_TOTAL": str(len(products)),
+                },
+            )
+
         return products, summary

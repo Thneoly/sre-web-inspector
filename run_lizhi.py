@@ -4,10 +4,14 @@
 Components used:
   - BrowserContextManager  → browser lifecycle
   - WebInspectionNode      → page navigation + evidence (screenshot, HTML, network)
+  - ApiCapture             → in-memory JSON API response interception
+  - RequestReplayer        → direct API calls reusing browser auth
   - RunContext             → outputs/runs/{run_id}/ organized output
   - RetryPolicy            → run_with_retry for robust page visits
+  - run_hooks              → lifecycle shell commands
   - reporter               → JSON + HTML report generation
   - template.render_value  → URL construction with {{ var }} substitution
+  - paginate_by_url        → URL-based pagination
 """
 from __future__ import annotations
 
@@ -26,10 +30,18 @@ async def main() -> None:
     parser.add_argument("--start-page", type=int, default=1)
     parser.add_argument("--max-pages", type=int, default=0, help="Max pages (0=all)")
     parser.add_argument("--screenshot", action="store_true", help="Take page screenshots")
+    parser.add_argument("--save-html", action="store_true", default=True, help="Save HTML snapshots (default: on)")
+    parser.add_argument("--no-save-html", action="store_true", help="Disable HTML snapshots")
+    parser.add_argument("--save-network", action="store_true", default=True, help="Save network traces (default: on)")
+    parser.add_argument("--no-save-network", action="store_true", help="Disable network traces")
     parser.add_argument("--user-data-dir", default=None)
     parser.add_argument("--retry-times", type=int, default=2)
     parser.add_argument("--retry-interval", type=int, default=1000)
     parser.add_argument("--timeout", type=int, default=30000)
+    parser.add_argument("--hook-start", action="append", default=None,
+                        help="Shell command(s) to run on collection start (repeatable)")
+    parser.add_argument("--hook-complete", action="append", default=None,
+                        help="Shell command(s) to run on collection complete (repeatable)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -40,10 +52,14 @@ async def main() -> None:
         start_page=args.start_page,
         max_pages=args.max_pages,
         screenshot=args.screenshot,
+        save_html=not args.no_save_html,
+        save_network=not args.no_save_network,
         user_data_dir=args.user_data_dir,
         retry_times=args.retry_times,
         retry_interval_ms=args.retry_interval,
         timeout=args.timeout,
+        hook_start=args.hook_start,
+        hook_complete=args.hook_complete,
     )
 
     print(f"\nTotal products: {len(products)}")
@@ -79,5 +95,6 @@ async def main() -> None:
         print(f"Products: {product_count}, Bundles: {bundle_count}")
 
 
+    # Platform breakdown
 if __name__ == "__main__":
     asyncio.run(main())

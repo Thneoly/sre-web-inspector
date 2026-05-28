@@ -12,6 +12,7 @@ import yaml
 from pydantic import ValidationError
 
 from sre_web_inspector import BrowserContextManager, RequestReplayer
+from sre_web_inspector.auth import LoginFlow
 from sre_web_inspector.config_schema import AppConfig, HooksConfig, PageConfig, ReplayRequestConfig
 from sre_web_inspector.hooks import run_hooks
 from sre_web_inspector.reporter import write_html_report, write_json_report
@@ -20,6 +21,7 @@ from sre_web_inspector.network.factory import (
     build_context_middleware_manager,
     build_page_middleware_manager,
 )
+from sre_web_inspector.page_generator import expand_page_generators
 from sre_web_inspector.retry import RetryPolicy, run_with_retry
 from sre_web_inspector.run_context import RunContext
 from sre_web_inspector.template import build_vars, render_value
@@ -51,7 +53,15 @@ def load_and_validate_config(*paths: str | Path) -> tuple[AppConfig, dict[str, A
     for path in paths:
         raw = load_config(path)
         merged = deep_merge(merged, raw)
-    rendered = render_value(merged, build_vars(merged))
+    vars_map = build_vars(merged)
+    rendered = render_value(merged, vars_map)
+
+    # Expand page_generators into concrete pages before validation
+    generated_pages = expand_page_generators(rendered, vars_map)
+    if generated_pages:
+        existing_pages: list[dict[str, Any]] = rendered.get("pages") or []
+        rendered["pages"] = existing_pages + generated_pages
+
     try:
         return AppConfig.model_validate(rendered), rendered
     except ValidationError as exc:
@@ -413,6 +423,14 @@ async def main() -> None:
                 "SRE_RUN_ID": run_ctx.run_id,
                 "SRE_OUTPUT_DIR": str(run_ctx.output_dir),
             })
+
+        if app_cfg.login and app_cfg.login.enabled:
+            login_result = await LoginFlow(cm, app_cfg, run_ctx).run()
+            if not login_result.success and app_cfg.login.on_failure == "stop":
+                raise RuntimeError(f"Login failed: {login_result.reason}")
+            logger.info("Login: enabled=%s mode=%s skipped=%s success=%s",
+                         login_result.enabled, login_result.mode,
+                         login_result.skipped, login_result.success)
 
         default_retry = RetryPolicy.from_config(app_cfg.runtime.retry.model_dump())
         global_replays = await run_replay_requests(

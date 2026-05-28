@@ -67,6 +67,57 @@ class TestConfigLoading:
         app_cfg, rendered = load_and_validate_config(config_path, config_path)
         assert len(app_cfg.pages) == 4  # 2 + 2 concatenated
 
+    def test_validate_config_with_login(self, tmp_path):
+        import yaml
+        config_file = tmp_path / "with_login.yaml"
+        config = {
+            "runtime": {"concurrency": 1, "timeout": 30000},
+            "browser": {"headless": True, "slow_mo": 0},
+            "pages": [{"name": "test", "url": "https://example.com"}],
+            "login": {
+                "enabled": True,
+                "mode": "form",
+                "login_url": "https://example.com/login",
+                "check": {"type": "api", "url": "https://example.com/api/me"},
+                "form": {
+                    "username_selector": "#user",
+                    "password_selector": "#pass",
+                    "submit_selector": "button",
+                    "username": "admin",
+                    "password": "secret",
+                },
+                "on_failure": "continue",
+            },
+        }
+        config_file.write_text(yaml.dump(config))
+        app_cfg, rendered = load_and_validate_config(str(config_file))
+        assert app_cfg.login.enabled is True
+        assert app_cfg.login.mode == "form"
+        assert app_cfg.login.on_failure == "continue"
+        assert app_cfg.login.form.username == "admin"
+
+    def test_validate_config_with_page_generators(self, tmp_path):
+        import yaml
+        config_file = tmp_path / "with_generators.yaml"
+        config = {
+            "vars": {"base": "https://x.com"},
+            "runtime": {"concurrency": 1, "timeout": 30000},
+            "browser": {"headless": True, "slow_mo": 0},
+            "pages": [{"name": "home", "url": "{{ base }}/home"}],
+            "page_generators": [
+                {
+                    "name": "id_pages",
+                    "type": "ids",
+                    "ids": [1, 2],
+                    "template": {"name": "p{{ id }}", "url": "{{ base }}/{{ id }}"},
+                }
+            ],
+        }
+        config_file.write_text(yaml.dump(config))
+        app_cfg, rendered = load_and_validate_config(str(config_file))
+        assert len(app_cfg.pages) == 3  # 1 static + 2 generated
+        assert app_cfg.pages[1].url == "https://x.com/1"
+
 
 class TestRewriteOutputDirs:
     def test_relative_path_rewritten(self, tmp_dir):

@@ -121,6 +121,69 @@ class PageConfig(BaseModel):
         return self
 
 
+class LoginCheckConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    type: Literal["none", "selector", "api", "cookie", "url_contains"] = "none"
+    url: str | None = None
+    selector: str | None = None
+    expect_status: int | None = None
+    cookie_name: str | None = None
+    timeout: int = Field(default=10_000, ge=1)
+
+
+class ManualLoginConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    wait_timeout: int = Field(default=120_000, ge=1)
+    success_url_contains: str | None = None
+    success_selector: str | None = None
+
+
+class FormLoginConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    username_selector: str
+    password_selector: str
+    submit_selector: str
+    username: str
+    password: str
+    after_submit: dict[str, Any] = Field(default_factory=dict)
+
+
+class CookieLoginConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    cookies: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class LoginEvidenceConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    screenshot_before: bool = False
+    screenshot_after: bool = False
+    save_storage_state: bool = False
+
+
+class LoginConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    enabled: bool = False
+    mode: Literal["manual", "form", "cookie"] = "manual"
+    login_url: str | None = None
+    on_failure: Literal["stop", "continue"] = "stop"
+    check: LoginCheckConfig | None = None
+    manual: ManualLoginConfig | None = None
+    form: FormLoginConfig | None = None
+    cookie: CookieLoginConfig | None = None
+    evidence: LoginEvidenceConfig = Field(default_factory=LoginEvidenceConfig)
+
+
+class PageGeneratorConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    name: str
+    type: Literal["list", "ids"] = "list"
+    id_field: str = "id"
+    ids: list[Any] = Field(default_factory=list)
+    values: list[dict[str, Any]] = Field(default_factory=list)
+    max_pages: int = Field(default=500, ge=1)
+    template: dict[str, Any]
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     vars: dict[str, Any] = Field(default_factory=dict)
@@ -131,3 +194,5 @@ class AppConfig(BaseModel):
     network_middlewares: dict[str, Any] | None = None
     replay_requests: list[ReplayRequestConfig] = Field(default_factory=list)
     pages: list[PageConfig] = Field(default_factory=list)
+    login: LoginConfig | None = None
+    page_generators: list[PageGeneratorConfig] = Field(default_factory=list)

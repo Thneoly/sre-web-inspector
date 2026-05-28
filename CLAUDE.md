@@ -52,6 +52,7 @@ src/
 │   ├── base_collector.py    # BaseCollector[T] abstract class for data-collection tasks
 │   ├── api_capture.py       # ApiCapture — in-memory JSON response interception
 │   ├── paginator.py         # paginate_by_url / paginate_by_click async generators
+│   ├── page_generator.py    # expand_page_generators() — template-based page expansion
 │   ├── request_replayer.py  # RequestReplayer (API calls reusing browser auth)
 │   ├── template.py          # {{ var }} substitution, type-preserving
 │   ├── retry.py             # RetryPolicy + run_with_retry
@@ -60,6 +61,11 @@ src/
 │   ├── reporter.py          # HTML + JSON report (generic + WebInspectionRun)
 │   ├── request_utils.py     # URL patch, JSON merge, header mask
 │   ├── route_modifier.py    # Playwright route modification helpers
+│   ├── auth/                # Login subsystem
+│   │   ├── login_flow.py    # LoginFlow orchestrator
+│   │   ├── login_result.py  # LoginResult dataclass
+│   │   ├── session_checker.py  # SessionChecker (5 check types)
+│   │   └── strategies.py    # Manual/Form/Cookie login strategies
 │   ├── collectors/          # ApiCollector, GrafanaCollector, TableCollector
 │   └── network/             # Middleware system
 │       ├── contexts.py      # RouteContext, RequestContext, ResponseContext
@@ -70,7 +76,7 @@ src/
 └── datamarket/              # Business logic
     ├── lizhi_inspector.py   # Lizhi.shop product catalog scraper
     └── cninfo_collector.py  # Cninfo announcement collector (深市/沪市/北交所)
-tests/                       # pytest (141 tests)
+tests/                       # pytest (249 tests)
 main.py                      # CLI entry point (YAML-driven inspection)
 run_lizhi.py                 # CLI entry point (lizhi.shop scraper)
 run_cninfo.py                # CLI entry point (cninfo announcement scraper)
@@ -79,17 +85,18 @@ config/                      # YAML config files
 
 ### Entry point (`main.py`)
 
-1. Loads YAML config(s), deep-merges them, renders `{{ var }}` templates, validates with Pydantic (`AppConfig`)
+1. Loads YAML config(s), deep-merges them, expands `page_generators` into concrete pages, renders `{{ var }}` templates, validates with Pydantic (`AppConfig`)
 2. Creates a `RunContext` → `outputs/runs/{run_id}/` with subdirectories
 3. Rewrites relative `output_dir` paths in middleware config to point into the run directory
 4. Launches `BrowserContextManager` (persistent context via `launch_persistent_context`)
 5. Runs `on_browser_start` hooks, binds `context_middlewares` to the BrowserContext
-6. Runs global `replay_requests` (API calls reusing browser auth context)
-7. For each page in `pages[]`, concurrently (gated by `asyncio.Semaphore`):
+6. Runs `LoginFlow` (if `login.enabled`): check session → execute login strategy → handle on_failure
+7. Runs global `replay_requests` (API calls reusing browser auth context)
+8. For each page in `pages[]`, concurrently (gated by `asyncio.Semaphore`):
    - Creates a new Page, binds merged middleware (global `network_middlewares` + page-specific `network_middlewares`)
    - Runs `on_page_before_goto` hook → `pre_replay_requests` → opens page → waits → runs `replay_requests` → `on_page_after_load` hook
    - Collects screenshots, HTML, network JSON, replay results
-8. Runs `on_run_complete` hook, writes `run_result.json` and `run_result.html`
+9. Runs `on_run_complete` hook, writes `run_result.json` and `run_result.html`
 
 ### Key components for business code
 
@@ -140,7 +147,7 @@ Three levels, from broadest to narrowest:
 ### Config variable flow
 
 ```
-YAML files → deep_merge → render_value(raw, build_vars(raw)) → AppConfig.model_validate → rewrite_output_dirs
+YAML files → deep_merge → render_value(raw, build_vars(raw)) → expand_page_generators → AppConfig.model_validate → rewrite_output_dirs
 ```
 
 `rewrite_output_dirs` patches relative `output_dir` paths inside middleware config to point into `outputs/runs/{run_id}/`.

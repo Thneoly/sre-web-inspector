@@ -37,7 +37,7 @@ uv run python run_cninfo.py                         # cninfo announcements
 uv run python run_cninfo.py --exchanges szse bj --max-clicks 5
 
 # Tests
-uv run pytest -v                                    # 141 tests
+uv run pytest -v                                    # 249 tests
 uv run pytest tests/test_template.py -v
 ```
 
@@ -49,6 +49,7 @@ src/
 │   ├── config_schema.py          # Pydantic v2 models (AppConfig root)
 │   ├── browser_context.py        # BrowserContextManager (launch, nav, screenshot)
 │   ├── inspector.py              # WebInspectionNode (per-page visit + evidence)
+│   ├── page_generator.py         # expand_page_generators() — template-based page expansion
 │   ├── request_replayer.py       # RequestReplayer (API calls reusing browser auth)
 │   ├── template.py               # {{ var }} substitution, type-preserving
 │   ├── retry.py                  # RetryPolicy + run_with_retry
@@ -60,6 +61,11 @@ src/
 │   ├── base_collector.py         # BaseCollector[T] — generic abstract base for business collectors
 │   ├── api_capture.py            # ApiCapture — in-memory JSON response interception
 │   ├── paginator.py              # paginate_by_url / paginate_by_click async generators
+│   ├── auth/                     # Login subsystem
+│   │   ├── login_flow.py         # LoginFlow orchestrator
+│   │   ├── login_result.py       # LoginResult dataclass
+│   │   ├── session_checker.py    # SessionChecker (5 check types)
+│   │   └── strategies.py         # Manual/Form/Cookie login strategies
 │   ├── collectors/               # ApiCollector, GrafanaCollector, TableCollector
 │   └── network/                  # Middleware system
 │       ├── contexts.py           # RouteContext, RequestContext, ResponseContext
@@ -82,16 +88,17 @@ main.py                           # CLI entry, orchestration pipeline
 run_lizhi.py                      # lizhi.shop entry point
 run_cninfo.py                     # cninfo entry point
 config/                           # YAML config files
-tests/                            # pytest (141 tests)
+tests/                            # pytest (249 tests)
 ```
 
 ## Core pipeline
 
 ```
-YAML files → deep_merge → render_value({{ vars }}) → Pydantic validate
+YAML files → deep_merge → render_value({{ vars }}) → expand_page_generators → Pydantic validate
   → RunContext(outputs/runs/{run_id}/) → rewrite_output_dirs
   → BrowserContextManager.start (launch_persistent_context)
-  → bind context_middlewares → global replay_requests
+  → bind context_middlewares → LoginFlow (check session → login strategy)
+  → global replay_requests
   → for each page (concurrent, semaphore-gated):
       new_page → bind merged middlewares → pre_replay_requests
       → hooks.on_page_before_goto → goto → wait → hooks.on_page_after_load
@@ -251,6 +258,10 @@ outputs/runs/{run_id}/
 ├── html/{page_name}.html
 ├── network/{page_name}.json
 ├── responses/{md5_hash}.json
+├── login/                     # Login evidence (screenshots, storage_state)
+│   ├── login_before.png
+│   ├── login_after.png
+│   └── storage_state.json
 ├── replay/
 │   ├── global/{name}.json
 │   └── {page_name}/

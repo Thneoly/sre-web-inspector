@@ -115,6 +115,123 @@ inspector.add_response_middleware(my_response_middleware)
 - `"WebInspectionRun"` → 巡检专用布局（截图、HTML、网络证据卡片）
 - 其他 → 通用 key-value 摘要 + items 表格
 
+## 登录流程（Login）
+
+支持在巡检 pages 之前，先执行统一登录。支持三种模式：
+
+### 手动登录模式（适合验证码 / MFA / 扫码）
+
+```yaml
+login:
+  enabled: true
+  mode: manual
+  login_url: "{{ base_url }}/login"
+
+  # 检测是否已登录，已登录则跳过
+  check:
+    type: selector
+    url: "{{ base_url }}/home"
+    selector: ".user-avatar"
+    timeout: 10000
+
+  manual:
+    wait_timeout: 120000          # 等待用户手动登录的超时时间
+    success_selector: ".user-avatar"  # 登录成功后的检测元素
+    success_url_contains: "/home"     # 或者通过 URL 判断
+
+  on_failure: stop               # 登录失败时停止（或 continue 继续）
+```
+
+### 表单自动登录模式
+
+```yaml
+login:
+  enabled: true
+  mode: form
+  login_url: "{{ base_url }}/login"
+
+  check:
+    type: api
+    url: "{{ base_url }}/api/current-user"
+    expect_status: 200
+
+  form:
+    username_selector: "input[name='username']"
+    password_selector: "input[name='password']"
+    submit_selector: "button[type='submit']"
+    username: "{{ env.USERNAME }}"
+    password: "{{ env.PASSWORD }}"
+    after_submit:
+      wait_for_url_contains: "/home"
+      wait_for_selector: ".user-avatar"
+      timeout: 30000
+```
+
+### Cookie 注入模式
+
+```yaml
+login:
+  enabled: true
+  mode: cookie
+  cookies:
+    - name: SESSION
+      value: "{{ env.SESSION_TOKEN }}"
+      domain: "example.com"
+      path: "/"
+```
+
+### 执行顺序
+
+```
+Context Middleware → LoginFlow → Global Replay → Page Inspection
+```
+
+登录流程在 global replay 之前执行，确保 replay 使用的是已认证的 context。
+
+## 动态页面生成（Page Generators）
+
+支持按规则批量生成 pages，适合按资源 ID 巡检多个同类页面。
+
+### ID 列表模式
+
+```yaml
+page_generators:
+  - name: resource_pages
+    type: ids
+    id_field: id
+    ids:
+      - 1001
+      - 1002
+      - 1003
+    template:
+      name: "resource_{{ id }}"
+      url: "{{ base_url }}/ids/{{ id }}/query"
+      screenshot: true
+      save_html: true
+```
+
+展开后等价于 3 个静态 pages。
+
+### 多值列表模式
+
+```yaml
+page_generators:
+  - name: env_dashboards
+    type: list
+    values:
+      - env: dev
+        region: us-east-1
+      - env: prod
+        region: us-west-2
+    template:
+      name: "{{ env }}_dashboard"
+      url: "{{ base_url }}/{{ region }}/{{ env }}"
+```
+
+### 与静态 pages 的关系
+
+动态生成后的 pages 与静态 pages 完全等价，同样支持 `network_middlewares`、`replay_requests`、`wait_for_requests`、`lifecycle` 等全部功能。展开在 Pydantic 校验之前完成。
+
 ## 输出结构
 
 ```
@@ -123,12 +240,16 @@ outputs/runs/{run_id}/
 ├── html/
 ├── network/
 ├── responses/
+├── login/                     # 登录证据（截图、storage_state）
+│   ├── login_before.png
+│   ├── login_after.png
+│   └── storage_state.json
 ├── replay/
 │   ├── global/
 │   └── {page_name}/
 ├── run_result.json
 ├── run_result.html
-└── {business_data}.json      # 业务采集器输出的数据文件
+└── {business_data}.json       # 业务采集器输出的数据文件
 ```
 
 ## 核心配置片段
@@ -184,7 +305,7 @@ pages:
 ## 测试
 
 ```bash
-uv run pytest -v          # 全部 141 个测试
+uv run pytest -v          # 全部 249 个测试
 uv run pytest tests/test_base_collector.py -v
 ```
 
